@@ -1,0 +1,275 @@
+###Step1: Docker Install on AlmaLinux
+[root@ahosan1 ~]# dnf config-manager --add-repo=https://download.docker.com/linux/centos/docker-ce.repo
+Adding repo from: https://download.docker.com/linux/centos/docker-ce.repo
+
+[root@ahosan1 ~]# dnf repolist -v
+
+[root@ahosan1 ~]# docker --version
+Docker version 24.0.5, build ced0996
+
+[root@ahosan1 ~]# systemctl start docker
+
+[root@ahosan1 ~]# systemctl enable docker
+Created symlink /etc/systemd/system/multi-user.target.wants/docker.service → /usr/lib/systemd/system/docker.service.
+
+[root@ahosan1 ~]# systemctl status docker
+
+
+
+###Step2: Registry Container Run
+[root@ahosan1 ~]# mkdir /docker_repo
+
+[root@ahosan1 ~]# docker run --detach \
+  --restart=always \
+  --name registry \
+  --volume /docker_repo:/docker_repo \
+  --env REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY=/docker_repo \
+  --publish 5000:5000 \
+  registry
+
+[root@ahosan1 ~]# netstat -tlnp | grep :5000
+
+
+
+###Step3: Install a TLS certificate
+[root@ahosan1 ~]# mkdir /certs
+[root@ahosan1 ~]# cat /etc/hosts
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+192.168.222.134 ahosan1.almalinux
+[root@ahosan1 ~]#
+
+[root@ahosan1 ~]# openssl req \
+  -newkey rsa:4096 -nodes -sha256 -keyout /certs/ahosan1.almalinux.key \
+  -addext "subjectAltName = DNS:ahosan1.almalinux" \
+  -x509 -days 365 -out /certs/ahosan1.almalinux.crt
+
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /certs/ahosan1.almalinux.key -out /certs/ahosan1.almalinux.crt
+
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+What you are about to enter is what is called a Distinguished Name or a DN.
+There are quite a few fields but you can leave some blank
+For some fields there will be a default value,
+If you enter '.', the field will be left blank.
+-----
+Country Name (2 letter code) [XX]:BD
+State or Province Name (full name) []:Dhaka
+Locality Name (eg, city) [Default City]:Dhaka
+Organization Name (eg, company) [Default Company Ltd]:ITCL
+Organizational Unit Name (eg, section) []:DevOps
+Common Name ()eg, your name or your server's hostname) []:ahosan1.almalinux
+Email Address []: ahosan@itcbd.com
+[root@ahosan1 ~]#
+
+
+
+###Step4: Nginx setup
+[root@ahosan1 ~]# dnf install nginx -y
+
+[root@ahosan1 ~]# vi /etc/nginx/nginx.conf  #add this line at http section
+    client_max_body_size 2048m;
+
+[root@ahosan1 ~]# vi /etc/nginx/conf.d/ahosan1.almalinux.conf
+
+server {
+    listen 80;
+    server_name ahosan1.almalinux;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen       443 ssl http2;
+    server_name  ahosan1.almalinux;
+
+    # ssl params
+    ssl_certificate /certs/ahosan1.almalinux.crt;
+    ssl_certificate_key /certs/ahosan1.almalinux.key;
+    ssl_protocols TLSv1.2;
+
+    location / {
+        proxy_pass                         http://localhost:5000;
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout                 600;
+    }
+}
+
+[root@ahosan1 certs]# systemctl stop firewalld.service
+[root@ahosan1 certs]# systemctl disable firewalld.service
+[root@ahosan1 certs]# setenforce 0
+[root@ahosan1 certs]# systemctl restart nginx
+
+[root@ahosan1 certs]# curl -kIL http://ahosan1.almalinux/v2/
+
+
+
+###Step5: Image push to Private Repo
+[root@ahosan1 certs]# docker run --name webserver --detach nginx
+
+[root@ahosan1 ~]# docker exec -it webserver /bin/bash
+root@c4659dbc1bff:/# ip addr
+bash: ip: command not found
+root@c4659dbc1bff:/# ping 8.8.8.8
+bash: ping: command not found
+root@c4659dbc1bff:/# apt update
+root@c4659dbc1bff:/# apt install iproute2 iputils-ping net-tools -y
+0% [Connecting to deb.debian.org]^C
+root@c4659dbc1bff:/# exit
+exit
+[root@ahosan1 ~]#
+
+[root@ahosan1 ~]# vi /etc/docker/daemon.json
+{
+  "insecure-registries" : ["https://ahosan1.almalinux"]
+}
+
+[root@ahosan1 certs]# mkdir -p /etc/docker/certs.d/ahosan1.almalinux
+[root@ahosan1 certs]# cp /certs/ahosan1.almalinux.crt /etc/docker/certs.d/ahosan1.almalinux/
+[root@ahosan1 certs]# systemctl restart docker
+
+[root@ahosan1 ~]# docker image ls
+REPOSITORY   TAG       IMAGE ID       CREATED      SIZE
+nginx        latest    eea7b3dcba7e   2 days ago   187MB
+registry     latest    0030ba3d620c   9 days ago   24.1MB
+
+[root@ahosan1 ~]# docker commit webserver nginx
+sha256:04a865eab091eeca930a357934d906bf50f7611a2979f9ee2fb521f5ddf9f261
+[root@ahosan1 ~]#
+
+[root@ahosan1 ~]# docker tag nginx ahosan1.almalinux/nginx
+[root@ahosan1 ~]# docker image ls
+REPOSITORY                TAG       IMAGE ID       CREATED      SIZE
+ahosan1.almalinux/nginx   latest    eea7b3dcba7e   2 days ago   187MB
+nginx                     latest    eea7b3dcba7e   2 days ago   187MB
+registry                  latest    0030ba3d620c   9 days ago   24.1MB
+[root@ahosan1 ~]#
+[root@ahosan1 ~]# docker image ls
+
+[root@ahosan1 certs]# docker push ahosan1.almalinux/nginx
+[root@ahosan1 certs]# curl -kL https://ahosan1.almalinux/v2/_catalog
+
+--run in one tab
+[root@ahosan1 certs]# docker logs -f registry
+--run in one tab
+[root@ahosan1 certs]# tail -1000f /var/log/nginx/access.log
+
+
+
+###Step6: On remote host
+[root@ahosan1 ~]# vi /etc/hosts
+  192.168.222.134 ahosan1.almalinux
+
+--copy cert here from private docker hub
+[root@ahosan1 ~]# mkdir -p /etc/docker/certs.d/ahosan1.almalinux
+
+[root@ahosan1 ~]# vi /etc/docker/daemon.json
+{
+    "registry-mirrors": ["https://ahosan1.almalinux"]
+}
+
+[root@ahosan1 ~]# systemctl restart docker.service
+[root@ahosan1 ~]# curl -kL https://ahosan1.almalinux/v2/_catalog
+
+[root@ahosan1 ~]# docker run --name webserver_custom -d -p 80:80 ahosan1.almalinux/nginx
+Unable to find image 'ahosan1.almalinux/nginx:latest' locally
+latest: Pulling from nginx
+52d2b7f179e3: Pull complete
+fd9f026c6310: Pull complete
+055fa98b4363: Pull complete
+96576293dd29: Pull complete
+a7c4092be904: Pull complete
+e3b6889c8954: Pull complete
+da761d9a302b: Pull complete
+d48f1c60ed53: Pull complete
+Digest: sha256:483fdbdc7ca49f019c694630ed031c2505a5a6398f7da13d205bb26c50e01b39
+Status: Downloaded newer image for ahosan1.almalinux/nginx:latest
+7aff3628d882249b70854cadb03392d14d80a2b1970e9b777d816743e4f1af29
+[root@ahosan1 ~]#
+
+
+
+####Step7: Pull & Push images at Private Registry
+--private reg
+[root@ahosan1 ~]# curl -kL https://ahosan1.almalinux/v2/_catalog
+{"repositories":["nginx"]}
+[root@ahosan1 ~]#
+[root@ahosan1 ~]# docker pull alpine:latest
+[root@ahosan1 ~]# docker images
+REPOSITORY                TAG       IMAGE ID       CREATED       SIZE
+ahosan1.almalinux/nginx   latest    04a865eab091   5 hours ago   187MB
+nginx                     <none>    eea7b3dcba7e   2 days ago    187MB
+registry                  latest    0030ba3d620c   10 days ago   24.1MB
+alpine                    latest    7e01a0d0a1dc   11 days ago   7.34MB
+[root@ahosan1 ~]#
+
+[root@ahosan1 ~]# docker tag alpine:latest ahosan1.almalinux/alpine:latest
+
+[root@ahosan1 ~]# docker push ahosan1.almalinux/alpine:latest
+The push refers to repository [ahosan1.almalinux/alpine]
+4693057ce236: Pushed
+latest: digest: sha256:c5c5fda71656f28e49ac9c5416b3643eaa6a108a8093151d6d1afc9463be8e33 size: 528
+[root@ahosan1 ~]#
+
+--from remote host
+[root@ahosan1 ~]# curl -kL https://ahosan1.almalinux/v2/_catalog
+
+[root@ahosan1 ~]# docker pull ahosan1.almalinux/alpine:latest
+latest: Pulling from alpine
+7264a8db6415: Already exists
+Digest: sha256:c5c5fda71656f28e49ac9c5416b3643eaa6a108a8093151d6d1afc9463be8e33
+Status: Downloaded newer image for ahosan1.almalinux/alpine:latest
+ahosan1.almalinux/alpine:latest
+[root@ahosan1 ~]#
+
+[root@ahosan1 ~]# docker images
+REPOSITORY                 TAG       IMAGE ID       CREATED       SIZE
+ahosan1.almalinux/nginx    latest    04a865eab091   6 hours ago   187MB
+ahosan1.almalinux/alpine   latest    7e01a0d0a1dc   11 days ago   7.34MB
+ubuntu-docker              latest    f7b598c2f531   4 weeks ago   127MB
+[root@ahosan1 ~]#
+
+###Step8: Delete from Private Reg and Push images from Remote
+--from private reg to delete pushed images
+[root@ahosan1 ~]# rm  /docker_repo/docker/registry/v2/repositories/alpine
+
+[root@ahosan1 ~]# docker restart registry
+registry
+[root@ahosan1 ~]# curl -kL https://ahosan1.almalinux/v2/_catalog
+{"repositories":["nginx"]}
+
+--from remote host for upload images
+[root@ahosan1 ~]# curl -kL https://ahosan1.almalinux/v2/_catalog
+{"repositories":["nginx"]}
+
+[root@ahosan1 ~]# docker rmi -f ahosan1.almalinux/alpine
+Untagged: ahosan1.almalinux/alpine:latest
+Untagged: ahosan1.almalinux/alpine@sha256:c5c5fda71656f28e49ac9c5416b3643eaa6a108a8093151d6d1afc9463be8e33
+Deleted: sha256:7e01a0d0a1dcd9e539f8e9bbd80106d59efbdf97293b3d38f5d7a34501526cdb
+[root@ahosan1 ~]#
+
+[root@ahosan1 ~]# docker images
+REPOSITORY      TAG       IMAGE ID       CREATED       SIZE
+ubuntu-docker   latest    f7b598c2f531   4 weeks ago   127MB
+
+[root@ahosan1 ~]# docker pull alpine:latest
+[root@ahosan1 ~]# docker images
+REPOSITORY      TAG       IMAGE ID       CREATED       SIZE
+alpine          latest    7e01a0d0a1dc   11 days ago   7.34MB
+ubuntu-docker   latest    f7b598c2f531   4 weeks ago   127MB
+[root@ahosan1 ~]#
+
+[root@ahosan1 ~]# docker tag alpine:latest ahosan1.almalinux/alpine:latest
+
+[root@ahosan1 ~]# docker push ahosan1.almalinux/alpine:latest
+The push refers to repository [ahosan1.almalinux/alpine]
+4693057ce236: Pushed
+latest: digest: sha256:c5c5fda71656f28e49ac9c5416b3643eaa6a108a8093151d6d1afc9463be8e33 size: 528
+[root@ahosan1 ~]#
+
+[root@ahosan1 ~]# curl -kL https://ahosan1.almalinux/v2/_catalog
+{"repositories":["alpine","nginx"]}
+[root@ahosan1 ~]#
+
